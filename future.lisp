@@ -444,7 +444,7 @@
                                (lambda (ev)
                                  (handler-case
                                    (funcall ,old-signal-error ev)
-                                   ,@error-forms))))
+                                   ,@(process-error-forms future-gen error-forms)))))
                        ;; return the future-gen form verbatim
                        ,future-gen))))
        ;; define a function that signals the error, and a top-level error handler
@@ -460,7 +460,7 @@
               (,handler-fn (lambda (ev)
                              (handler-case
                                (funcall ,signal-error ev)
-                               ,@error-forms))))
+                               ,@(process-error-forms bound-future error-forms)))))
          (if (futurep ,bound-future)
              (progn
                (attach-errback ,bound-future ,handler-fn))
@@ -492,9 +492,9 @@
            (macrolet ((attach (future-gen fn)
                         (funcall ,attach-orig
                           `(attach
-                             (wrap-event-handler ,future-gen ,',error-forms)
+                             (wrap-event-handler ,future-gen ,(process-error-forms future-gen ',error-forms))
                              ,fn)
                           ,env)))
                ,body-form)
-           ,@error-forms))))
+           ,@(process-error-forms nil error-forms)))))
 
