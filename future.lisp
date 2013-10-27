@@ -427,7 +427,8 @@
    are preserved."
   (let ((signal-error (gensym "signal-error"))
         (handler-fn (gensym "handler-fn"))
-        (vals (gensym "vals")))
+        (vals (gensym "vals"))
+        (bound-future (gensym "bound-future")))
     ;; hijack any child wrap-event-handler macros to just return their
     ;; future-gen form verbatim, but add their error handlers to the error
     ;; handling chain
@@ -451,17 +452,18 @@
        ;; of `wrap-event-handler` that occurs in the `future-gen` form will inject
        ;; its error handler between handler-fn and signal-error.
        (let* ((,signal-error (lambda (ev) (error ev)))
-              (,handler-fn (lambda (ev)
-                             (handler-case
-                               (funcall ,signal-error ev)
-                               ,@error-forms)))
               ;; sub (wrap-event-handler ...) forms are expanded with ,future-gen
               ;; they add their handler-case forms into a lambda which is injected
               ;; into the error handling chain,
-              (,vals (multiple-value-list ,future-gen)))
-         (if (futurep (car ,vals))
+              (,vals (multiple-value-list ,future-gen))
+              (,bound-future (car ,vals))
+              (,handler-fn (lambda (ev)
+                             (handler-case
+                               (funcall ,signal-error ev)
+                               ,@error-forms))))
+         (if (futurep ,bound-future)
              (progn
-               (attach-errback (car ,vals) ,handler-fn))
+               (attach-errback ,bound-future ,handler-fn))
              (apply #'values ,vals))))))
 
 (defmacro future-handler-case (body-form &rest error-forms &environment env)
