@@ -3,7 +3,9 @@
   (:nicknames :asf)
   (:export #:future
            #:future-finished-p
+           #:future-backtrace
            #:make-future
+           #:add-backtrace-entry
            #:attach-errback
            #:lookup-forwarded-future
            #:signal-error

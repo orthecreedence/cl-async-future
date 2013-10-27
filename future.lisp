@@ -18,13 +18,24 @@
                     callbacks from this future onto the returned one. Allows
                     values to transparently be derived from many layers deep of
                     futures, almost like a real call stack.")
+   (track-backtrace :accessor future-track-backtrace :initarg :track-backtrace :initform t
+    :documentation "Specifies to the lib whether or not this future should have
+                    its backtrace tracked. If nil, calls to add-backtrace-entry
+                    will do nothing.")
    (finished :accessor future-finished :reader future-finished-p :initform nil
     :documentation "Marks if a future has been finished or not.")
    (events :accessor future-events :initform nil
     :documentation "Holds events for this future, to be handled with event-handler.")
    (values :accessor future-values :initform nil
     :documentation "Holds the finished value(s) of the computer future. Will be
-                    apply'ed to the callbacks."))
+                    apply'ed to the callbacks.")
+   (backtrace :accessor future-backtrace :initarg :backtrace :initform nil
+    :documentation "Optionally holds a backtrace of the calls used on this
+                    future. This must be done by the app itself, the future
+                    can't figure it out on its own. However, doing so may get
+                    you out of sticky situations where a failure path is not
+                    immediately obvious (since almost everything is anonymous
+                    lambdas all the way down)."))
   (:documentation
     "Defines a class which represents a value that MAY be ready sometime in the
      future. Also supports attaching callbacks to the future such that they will
@@ -35,12 +46,34 @@
     (format s "~_callback(s): ~s " (length (future-callbacks future)))
     (format s "~_errback(s): ~s " (length (future-errbacks future)))
     (format s "~_finished: ~a " (future-finished future))
-    (format s "~_forward: ~a" (not (not (future-forward-to future))))))
+    (format s "~_forward: ~a " (not (not (future-forward-to future))))
+    (format s "~_backtrace(~a): ~a" (future-track-backtrace future)
+                                    (length (future-backtrace future)))))
 
-(defun make-future (&key preserve-callbacks (reattach-callbacks t))
+(defun make-future (&key preserve-callbacks (reattach-callbacks t) (track-backtrace t))
   "Create a blank future."
   (make-instance 'future :preserve-callbacks preserve-callbacks
-                         :reattach-callbacks reattach-callbacks))
+                         :reattach-callbacks reattach-callbacks
+                         :track-backtrace track-backtrace))
+
+(defun add-backtrace-entry (future form-name &key args)
+  "Format a backtrace entry and add it to a future. Providing a standard
+   function allows apps to utilize the same backtrace formats that this library
+   does. Returns the entry that was pushed onto the future's backtrace.
+   
+   Note that this function checks the future's track-backtrace accessor before
+   adding any backtrace items. If it's nil, it silently returns nil without
+   touching the future."
+  (when (future-track-backtrace future)
+    (let* ((entry-name (if (stringp form-name)
+                           (string-upcase form-name)
+                           (string form-name)))
+           (entry-name (intern entry-name :keyword))
+           (entry (if args
+                      (list :name entry-name :args args)
+                      (list :name entry-name))))
+      (push entry (future-backtrace future))
+      entry)))
 
 (defun futurep (future)
   "Is this a future?"
@@ -74,6 +107,12 @@
     (do-add-callback future-to cb))
   (dolist (errback (future-errbacks future-from))
     (attach-errback future-to errback))
+  ;; append the to's backtrace to the from, then set the resulting list into
+  ;; from. this looks backwards, and it is, because backtraces are pushed, so
+  ;; we want newest-first ordering.
+  (setf (future-track-backtrace future-to) (future-track-backtrace future-from))
+  (setf (future-backtrace future-to) (append (future-backtrace future-to)
+                                             (future-backtrace future-from)))
   ;; mark the future as forwarded to other parts of the system know to use the
   ;; new future for various tasks.
   (setf (future-forward-to future-from) future-to))
@@ -176,8 +215,11 @@
   "Macro wrapping attachment of callback to a future (takes multiple values into
    account, which a simple function cannot)."
   (let ((future-values (gensym "future-values")))
-    `(let ((,future-values (multiple-value-list ,future-gen)))
-       (cl-async-future::attach-cb ,future-values ,cb))))
+    `(let* ((,future-values (multiple-value-list ,future-gen))
+            (return-future (cl-async-future::attach-cb ,future-values ,cb)))
+       ;; track the backtrace on this future.
+       (add-backtrace-entry return-future :attach :args ',cb)
+       return-future)))
 
 ;; -----------------------------------------------------------------------------
 ;; start our syntactic abstraction section (rolls off the tongue nicely)
@@ -353,6 +395,22 @@
          (,next-fn))
        ,future-sym)))
 
+(defun process-error-forms (future error-forms)
+  "Allow future-handler-case to have two args (second one optional) to its error
+   forms while still only passing one to handler-case. This lets us optionally
+   bind to the future the error was signaled on (as the second argument)."
+  (dolist (form error-forms)
+    (let ((args (cadr form)))
+      (when (< 1 (length args))
+        (let* ((future-bind (cadr args))
+               (body `(let ((,future-bind ,future))
+                        ,(caddr form))))
+          ;; in-place update
+          (setf (cadr form) (list (car args)))
+          (setf (caddr form) body)))))
+  (format t "errform: ~s~%" error-forms)
+  error-forms)
+
 (defmacro wrap-event-handler (future-gen error-forms)
   "Used to wrap the future-generation forms of future syntax macros. This macro
    is not to be used directly, but instead by future-handler-case.
@@ -437,5 +495,4 @@
                           ,env)))
                ,body-form)
            ,@error-forms))))
-
 
