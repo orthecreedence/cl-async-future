@@ -217,9 +217,6 @@
   (let ((future-values (gensym "future-values")))
     `(let* ((,future-values (multiple-value-list ,future-gen))
             (return-future (cl-async-future::attach-cb ,future-values ,cb)))
-       ;; track the backtrace on this future.
-       (when (futurep (car ,future-values))
-         (add-backtrace-entry (car ,future-values) :attach :args ',cb))
        return-future)))
 
 ;; -----------------------------------------------------------------------------
@@ -408,7 +405,7 @@
                           ,@(cddr form))))
             ;; in-place update
             (setf (cadr form) (list (car args)))
-            (setf (caddr form) body)))))
+            (setf (cddr form) (list body))))))
     copy))
 
 (defmacro wrap-event-handler (future-gen error-forms)
