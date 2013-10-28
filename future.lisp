@@ -218,7 +218,8 @@
     `(let* ((,future-values (multiple-value-list ,future-gen))
             (return-future (cl-async-future::attach-cb ,future-values ,cb)))
        ;; track the backtrace on this future.
-       ;(add-backtrace-entry return-future :attach :args ',cb)
+       (when (futurep (car ,future-values))
+         (add-backtrace-entry (car ,future-values) :attach :args ',cb))
        return-future)))
 
 ;; -----------------------------------------------------------------------------
@@ -404,7 +405,7 @@
         (when (< 1 (length args))
           (let* ((future-bind (cadr args))
                  (body `(let ((,future-bind ,future))
-                          ,(caddr form))))
+                          ,@(cddr form))))
             ;; in-place update
             (setf (cadr form) (list (car args)))
             (setf (caddr form) body)))))
