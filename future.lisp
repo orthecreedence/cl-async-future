@@ -218,7 +218,7 @@
     `(let* ((,future-values (multiple-value-list ,future-gen))
             (return-future (cl-async-future::attach-cb ,future-values ,cb)))
        ;; track the backtrace on this future.
-       (add-backtrace-entry return-future :attach :args ',cb)
+       ;(add-backtrace-entry return-future :attach :args ',cb)
        return-future)))
 
 ;; -----------------------------------------------------------------------------
@@ -245,7 +245,6 @@
          (finished-future (gensym "finished-future"))
          (finished-vals (gensym "finished-vals"))
          (finished-cb (gensym "finished-cb"))
-         (inc-value (gensym "inc-value"))
          (args (gensym "args")))
     `(let* ((,num-bindings ,(length bindings)) ; make a local var for num-bindings
             (,finished-future (make-future))
@@ -399,17 +398,17 @@
   "Allow future-handler-case to have two args (second one optional) to its error
    forms while still only passing one to handler-case. This lets us optionally
    bind to the future the error was signaled on (as the second argument)."
-  (dolist (form error-forms)
-    (let ((args (cadr form)))
-      (when (< 1 (length args))
-        (let* ((future-bind (cadr args))
-               (body `(let ((,future-bind ,future))
-                        ,(caddr form))))
-          ;; in-place update
-          (setf (cadr form) (list (car args)))
-          (setf (caddr form) body)))))
-  (format t "errform: ~s~%" error-forms)
-  error-forms)
+  (let ((copy (copy-tree error-forms)))
+    (dolist (form copy)
+      (let ((args (cadr form)))
+        (when (< 1 (length args))
+          (let* ((future-bind (cadr args))
+                 (body `(let ((,future-bind ,future))
+                          ,(caddr form))))
+            ;; in-place update
+            (setf (cadr form) (list (car args)))
+            (setf (caddr form) body)))))
+    copy))
 
 (defmacro wrap-event-handler (future-gen error-forms)
   "Used to wrap the future-generation forms of future syntax macros. This macro
@@ -462,8 +461,7 @@
                                (funcall ,signal-error ev)
                                ,@(process-error-forms bound-future error-forms)))))
          (if (futurep ,bound-future)
-             (progn
-               (attach-errback ,bound-future ,handler-fn))
+             (attach-errback ,bound-future ,handler-fn)
              (apply #'values ,vals))))))
 
 (defmacro future-handler-case (body-form &rest error-forms &environment env)
@@ -490,11 +488,17 @@
            ;; wrapped (recursively, if called more than once) in the
            ;; `wrap-event-handler` macro.
            (macrolet ((attach (future-gen fn)
-                        (funcall ,attach-orig
-                          `(attach
-                             (wrap-event-handler ,future-gen ,(process-error-forms future-gen ',error-forms))
-                             ,fn)
-                          ,env)))
+                        (let ((args (gensym "args"))
+                              (future (gensym "future")))
+                          `(let ((,future ,future-gen))
+                             ,(funcall ,attach-orig
+                                `(attach
+                                   (wrap-event-handler ,future ,',error-forms)
+                                   (lambda (&rest ,args)
+                                     (handler-case
+                                       (apply ,fn ,args)
+                                       ,@(process-error-forms future ',error-forms))))
+                                ,env)))))
                ,body-form)
            ,@(process-error-forms nil error-forms)))))
 
