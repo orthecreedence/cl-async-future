@@ -172,12 +172,18 @@
         (apply cb-wrapped future-values))
     cb-return-future))
 
-(defmacro attach (future-gen cb)
-  "Macro wrapping attachment of callback to a future (takes multiple values into
-   account, which a simple function cannot)."
+(defmacro attach-default (future-gen cb)
+  "Main default attach macro that attaches a function to a future."
   (let ((future-values (gensym "future-values")))
     `(let ((,future-values (multiple-value-list ,future-gen)))
        (cl-async-future::attach-cb ,future-values ,cb))))
+
+(defmacro attach (&whole form future-gen cb &environment env)
+  "Macro wrapping attachment of callback to a future (takes multiple values into
+   account, which a simple function cannot)."
+  (declare (ignorable future-gen cb))
+  (let ((expander (or (car (get-expanders env)) 'attach-default)))
+    `(,expander ,@(cdr form))))
 
 ;; -----------------------------------------------------------------------------
 ;; start our syntactic abstraction section (rolls off the tongue nicely)
@@ -444,4 +450,29 @@
                ,body-form)
            ,@error-forms))))
 
+(define-symbol-macro %attach-expander% (attach-default))
+(defun get-expanders (env)
+  (macroexpand-1 '%attach-expander% env))
+
+(defun my-handler-case (form &rest errors)
+  (eval `(handler-case ,form ,@errors)))
+
+(defmacro wrappable-attach (future-gen cb &environment env)
+  `(symbol-macrolet ((%attach-expander% ,(cdr (get-expanders env))))
+     (attach (my-handler-case
+               '(progn ,future-gen)
+               '(t (e) (format t "errrr: ~a~%" e)))
+             ,cb)))
+
+(defmacro fhc (body-form &rest error-forms &environment env)
+  (format t "expander: ~s~%" (get-expanders env))
+  `(handler-case
+     (symbol-macrolet ((%attach-expander% (wrappable-attach ,@(get-expanders env))))
+       ,body-form)
+     ,@error-forms))
+
+(fhc
+  (alet* ((x (+ 5 'a)))
+    (format t "x is ~a~%" x))
+  (t (e) (format t "err: ~a~%" e)))
 
