@@ -172,18 +172,47 @@
         (apply cb-wrapped future-values))
     cb-return-future))
 
+;; This is an odd little hack (thanks Paul Khuong) that allows us to additively
+;; wrap error handling around our future forms (via future-handler-case and
+;; attach-with-error). This is what makes async error handling possible (and
+;; portable).
+(define-symbol-macro %attach-expander% (attach-default))
+(defun get-expanders (env)
+  "Given a macro environment, grab the list of value attached to it. These
+   values are defined by symbol-macrolet calls in the error handling functions
+   and point to specific macros that we call to either wrap the error handling
+   around our attach calls or to actually call attach. It's a bit strange, but
+   it works well."
+  (macroexpand-1 '%attach-expander% env))
+
 (defmacro attach-default (future-gen cb)
-  "Main default attach macro that attaches a function to a future."
+  "The default attach macro, does what attach *should* do if it wasn't dealing
+   with symbol-macrolet expansion madness. This could be a function except that
+   it needs to bind multiple return values and send them into our heroic future,
+   meaning for it to be any use it should really be a macro."
   (let ((future-values (gensym "future-values")))
     `(let ((,future-values (multiple-value-list ,future-gen)))
        (cl-async-future::attach-cb ,future-values ,cb))))
 
 (defmacro attach (&whole form future-gen cb &environment env)
-  "Macro wrapping attachment of callback to a future (takes multiple values into
-   account, which a simple function cannot)."
-  (declare (ignorable future-gen cb))
-  (let ((expander (or (car (get-expanders env)) 'attach-default)))
-    `(,expander ,@(cdr form))))
+  "Main default attach macro that attaches a function to a future."
+  (declare (ignore future-gen cb))
+  ;; grab an expander off our symbol macro list. if it's a list, we use the
+  ;; first value as the function/macro call and the rest of the values as the
+  ;; first arguments (followed by our future-gen and cb args).
+  ;;
+  ;; so the value 'attach-default gives us
+  ;;   (attach-default future-gen cb)
+  ;;
+  ;; and '(attach-with-error ((t (e) (format t "oh no: ~a~%" e)))) gives us
+  ;;   (attach-with-error ((t (e) (format t "oh no: ~a~%" e))) future-gen cb)
+  ;;
+  ;; This lets us send arbitrary args to our expander macros.
+  (let* ((expander (or (car (get-expanders env)) 'attach-default)))
+    `(,@(if (listp expander)
+            (list* (car expander) (cdr expander))
+            (list expander))
+      ,@(cdr form))))
 
 ;; -----------------------------------------------------------------------------
 ;; start our syntactic abstraction section (rolls off the tongue nicely)
@@ -412,67 +441,36 @@
                (attach-errback (car ,vals) ,handler-fn))
              (apply #'values ,vals))))))
 
+(defmacro attach-with-error (error-forms future-gen cb &environment env)
+  "Called by attach (by instigated by future-handler-case), this macro applies
+   our error handling forms to our attach future bindings *and* attached
+   callback function. It is the main tool of future-handler-case, and is invoked
+   by a strange symbol-macrolet hack that allows us to additively wrap error
+   handling around our future generating forms."
+  (let ((args (gensym "awe-args")))
+    ;; remove *this call* off the symbol macro list and call attach after
+    ;; wrapping our error handling around everything.
+    `(symbol-macrolet ((%attach-expander% ,(cdr (get-expanders env))))
+       (attach (wrap-event-handler ,future-gen ,error-forms)
+               (lambda (&rest ,args)
+                 (handler-case
+                   (apply ,cb ,args)
+                   ,@error-forms))))))
+
 (defmacro future-handler-case (body-form &rest error-forms &environment env)
-  "Wrap all of our lovely attach macro up with an event handler. This is more or
-   less restricted to the form it's run in.
-   
-   Note that we only have to wrap (attach) because *all other syntax macros* use
-   attach. This greatly simplifies our code."
+  "Provides lexical error handling for any contained forms, including async
+   futures (both the future generation forms and the resulting attached lambdas)
+   offering a near-replacement for handler-case for async."
   (if (find :future-debug *features*)
       ;; we're debugging futures...disable all error handling (so errors bubble
       ;; up to main loop)
       body-form
-      ;; save the original ttach macro function so is isn't overwritten by
-      ;; macrolet, the slithering scope-stealing snake. if future-handler-case
-      ;; is called inside another future-handler-case, these "attach-orig"
-      ;; function will be bound to the wrapping macrolet form instead of the
-      ;; top-level macros, which is perfect because we want to wrap the forms
-      ;; multiple times.
-      (let ((attach-orig (macro-function 'attach env)))
-        ;; wrap the top-level form in a handler-case to catch any errors we may
-        ;; have before the futures are even generated.
-        `(handler-case
-           ;; redefine our attach macro so that the future-gen forms are
-           ;; wrapped (recursively, if called more than once) in the
-           ;; `wrap-event-handler` macro.
-           (macrolet ((attach (future-gen fn)
-                        (let ((args (gensym "fhc-wrap-args")))
-                          (funcall ,attach-orig
-                            `(attach
-                               (wrap-event-handler ,future-gen ,',error-forms)
-                               ;; create a wrapper function around the given
-                               ;; callback that applies our error handlers
-                               (lambda (&rest ,args)
-                                 (handler-case
-                                   (apply ,fn ,args)
-                                   ,@',error-forms)))
-                            ,env))))
-               ,body-form)
-           ,@error-forms))))
-
-(define-symbol-macro %attach-expander% (attach-default))
-(defun get-expanders (env)
-  (macroexpand-1 '%attach-expander% env))
-
-(defun my-handler-case (form &rest errors)
-  (eval `(handler-case ,form ,@errors)))
-
-(defmacro wrappable-attach (future-gen cb &environment env)
-  `(symbol-macrolet ((%attach-expander% ,(cdr (get-expanders env))))
-     (attach (my-handler-case
-               '(progn ,future-gen)
-               '(t (e) (format t "errrr: ~a~%" e)))
-             ,cb)))
-
-(defmacro fhc (body-form &rest error-forms &environment env)
-  (format t "expander: ~s~%" (get-expanders env))
-  `(handler-case
-     (symbol-macrolet ((%attach-expander% (wrappable-attach ,@(get-expanders env))))
-       ,body-form)
-     ,@error-forms))
-
-(fhc
-  (alet* ((x (+ 5 'a)))
-    (format t "x is ~a~%" x))
-  (t (e) (format t "err: ~a~%" e)))
+      ;; kewl, we're not debugging. make sure the (attach) macro loads our
+      ;; attach-with-error form (which applies the specified error handling).
+      `(handler-case
+         ;; add our attach-with-error call (long with the error handling forms)
+         ;; to our attach expansion symbol macro
+         (symbol-macrolet ((%attach-expander% ((attach-with-error ,error-forms) ,@(get-expanders env) ',error-forms)))
+           ,body-form)
+         ,@error-forms)))
 
