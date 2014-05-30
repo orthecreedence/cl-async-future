@@ -60,7 +60,7 @@
                  (y (future-gen 2)))
             (setf val-x x
                   val-y y)))
-      (is (<= .19 (/ (- (get-internal-real-time) time-start) internal-time-units-per-second) .21))
+      (is (<= .19 (/ (- (get-internal-real-time) time-start) internal-time-units-per-second) .22))
       (is (= val-x 5))
       (is (= val-y 2)))))
 
@@ -141,4 +141,46 @@
                (+ x y)))))
     (alet ((res (get-val)))
       (is (= res 12)))))
+
+
+;; -----------------------------------------------------------------------------
+;; test error propagation
+;; -----------------------------------------------------------------------------
+
+(defun fdelay (val)
+  (let ((future (make-future)))
+    (finish future (+ val 1))
+    future))
+
+(defmacro defafun (name (future-bind) args &body body)
+  `(defun ,name ,args
+     (let ((,future-bind (make-future)))
+       (future-handler-case
+         (progn ,@body)
+         (t (e)
+           (signal-error ,future-bind e)))
+       ,future-bind)))
+
+(defafun async2 (future) (a)
+  (alet* ((z (fdelay a))
+          (b (+ z 1)))
+    (finish future (+ b "5"))))
+
+(defafun async1 (future) (a)
+  (alet* ((x (fdelay a))
+          (y (async2 x)))
+    (finish future y)))
+
+(test error-propagation
+  "Test error propagation"
+  (let ((error-triggered nil))
+    (future-handler-case
+      (attach (async1 1)
+        (lambda (_)
+          (declare (ignore _))
+          (setf error-triggered nil)))
+      (t (e)
+        (setf error-triggered t)
+        (is (typep e 'type-error))))
+    (is (eq t error-triggered))))
 

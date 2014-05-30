@@ -215,7 +215,105 @@
       ,@(cdr form))))
 
 ;; -----------------------------------------------------------------------------
-;; start our syntactic abstraction section (rolls off the tongue nicely)
+;; error handling
+;; -----------------------------------------------------------------------------
+
+(defmacro %handler-case (body &rest bindings)
+  "Simple wrapper around handler-case to make debugging a lot easier (by
+   allowing switching out the underlying form into something that isn't ugly
+   when macroexpanded)."
+  `(handler-case ,body ,@bindings))
+
+(defmacro wrap-event-handler (future-gen error-forms)
+  "Used to wrap the future-generation forms of future syntax macros. This macro
+   is not to be used directly, but instead by future-handler-case.
+   
+   It allows itself to be recursive, but any recursions will simply add their
+   error forms for a top-level list and return the form they are given as the
+   body. This allows a top-level form to add an error handler to a future, while
+   gathering the lower-level forms' handler-case bindings into one big handler
+   function (created with make-nexted-handler-cases).
+   
+   Note that since normally the wrap-event-handler forms expand outside in, we
+   have to do some trickery with the error-handling functions to make sure the
+   order of the handler-case forms (as far as what level of the tree we're on)
+   are preserved."
+  (let ((signal-error (gensym "signal-error"))
+        (handler-fn (gensym "handler-fn"))
+        (vals (gensym "vals")))
+    ;; hijack any child wrap-event-handler macros to just return their
+    ;; future-gen form verbatim, but add their error handlers to the error
+    ;; handling chain
+    `(macrolet ((wrap-event-handler (future-gen error-forms)
+                  (let ((old-signal-error (gensym "old-signal-error")))
+                    `(progn
+                       ;; "inject" the next-level down error handler in between the
+                       ;; error triggering function and the error handler one level
+                       ;; up. this preserves the handler-case tree (as opposed to
+                       ;; reversing it)
+                       (let ((,old-signal-error ,',signal-error))
+                         (setf ,',signal-error
+                               (lambda (ev)
+                                 (%handler-case
+                                   (funcall ,old-signal-error ev)
+                                   ,@error-forms))))
+                       ;; return the future-gen form verbatim
+                       ,future-gen))))
+       ;; define a function that signals the error, and a top-level error handler
+       ;; which uses the error-forms passed to THIS macro instance. any instance
+       ;; of `wrap-event-handler` that occurs in the `future-gen` form will inject
+       ;; its error handler between handler-fn and signal-error.
+       (let* ((,signal-error (lambda (ev) (error ev)))
+              (,handler-fn (lambda (ev)
+                             (format t "got ev on future: ~a~%" ev)
+                             (%handler-case
+                               (funcall ,signal-error ev)
+                               ,@error-forms)))
+              ;; sub (wrap-event-handler ...) forms are expanded with ,future-gen
+              ;; they add their handler-case forms into a lambda which is injected
+              ;; into the error handling chain,
+              (,vals (multiple-value-list ,future-gen)))
+         (format t "future? ~a~%" (car ,vals))
+         (if (futurep (car ,vals))
+             (progn
+               (attach-errback (car ,vals) ,handler-fn))
+             (apply #'values ,vals))))))
+
+(defmacro attach-with-error (error-forms future-gen cb &environment env)
+  "Called by attach (by instigated by future-handler-case), this macro applies
+   our error handling forms to our attach future bindings *and* attached
+   callback function. It is the main tool of future-handler-case, and is invoked
+   by a strange symbol-macrolet hack that allows us to additively wrap error
+   handling around our future generating forms."
+  (let ((args (gensym "awe-args")))
+    ;; remove *this call* off the symbol macro list and call attach after
+    ;; wrapping our error handling around everything.
+    `(symbol-macrolet ((%attach-expander% ,(cdr (get-expanders env))))
+       (attach (wrap-event-handler ,future-gen ,error-forms)
+               (lambda (&rest ,args)
+                 (%handler-case
+                   (apply ,cb ,args)
+                   ,@error-forms))))))
+
+(defmacro future-handler-case (body-form &rest error-forms &environment env)
+  "Provides lexical error handling for any contained forms, including async
+   futures (both the future generation forms and the resulting attached lambdas)
+   offering a near-replacement for handler-case for async."
+  (if (find :future-debug *features*)
+      ;; we're debugging futures...disable all error handling (so errors bubble
+      ;; up to main loop)
+      body-form
+      ;; kewl, we're not debugging. make sure the (attach) macro loads our
+      ;; attach-with-error form (which applies the specified error handling).
+      `(%handler-case
+         ;; add our attach-with-error call (long with the error handling forms)
+         ;; to our attach expansion symbol macro
+         (symbol-macrolet ((%attach-expander% ((attach-with-error ,error-forms) ,@(get-expanders env) ',error-forms)))
+           ,body-form)
+         ,@error-forms)))
+
+;; -----------------------------------------------------------------------------
+;; bourgeois syntax macros
 ;; -----------------------------------------------------------------------------
 
 (defmacro alet (bindings &body body)
@@ -387,90 +485,4 @@
                          `(wait-for (progn ,@body) (,next-fn))))))
          (,next-fn))
        ,future-sym)))
-
-(defmacro wrap-event-handler (future-gen error-forms)
-  "Used to wrap the future-generation forms of future syntax macros. This macro
-   is not to be used directly, but instead by future-handler-case.
-   
-   It allows itself to be recursive, but any recursions will simply add their
-   error forms for a top-level list and return the form they are given as the
-   body. This allows a top-level form to add an error handler to a future, while
-   gathering the lower-level forms' handler-case bindings into one big handler
-   function (created with make-nexted-handler-cases).
-   
-   Note that since normally the wrap-event-handler forms expand outside in, we
-   have to do some trickery with the error-handling functions to make sure the
-   order of the handler-case forms (as far as what level of the tree we're on)
-   are preserved."
-  (let ((signal-error (gensym "signal-error"))
-        (handler-fn (gensym "handler-fn"))
-        (vals (gensym "vals")))
-    ;; hijack any child wrap-event-handler macros to just return their
-    ;; future-gen form verbatim, but add their error handlers to the error
-    ;; handling chain
-    `(macrolet ((wrap-event-handler (future-gen error-forms)
-                  (let ((old-signal-error (gensym "old-signal-error")))
-                    `(progn
-                       ;; "inject" the next-level down error handler in between the
-                       ;; error triggering function and the error handler one level
-                       ;; up. this preserves the handler-case tree (as opposed to
-                       ;; reversing it)
-                       (let ((,old-signal-error ,',signal-error))
-                         (setf ,',signal-error
-                               (lambda (ev)
-                                 (handler-case
-                                   (funcall ,old-signal-error ev)
-                                   ,@error-forms))))
-                       ;; return the future-gen form verbatim
-                       ,future-gen))))
-       ;; define a function that signals the error, and a top-level error handler
-       ;; which uses the error-forms passed to THIS macro instance. any instance
-       ;; of `wrap-event-handler` that occurs in the `future-gen` form will inject
-       ;; its error handler between handler-fn and signal-error.
-       (let* ((,signal-error (lambda (ev) (error ev)))
-              (,handler-fn (lambda (ev)
-                             (handler-case
-                               (funcall ,signal-error ev)
-                               ,@error-forms)))
-              ;; sub (wrap-event-handler ...) forms are expanded with ,future-gen
-              ;; they add their handler-case forms into a lambda which is injected
-              ;; into the error handling chain,
-              (,vals (multiple-value-list ,future-gen)))
-         (if (futurep (car ,vals))
-             (progn
-               (attach-errback (car ,vals) ,handler-fn))
-             (apply #'values ,vals))))))
-
-(defmacro attach-with-error (error-forms future-gen cb &environment env)
-  "Called by attach (by instigated by future-handler-case), this macro applies
-   our error handling forms to our attach future bindings *and* attached
-   callback function. It is the main tool of future-handler-case, and is invoked
-   by a strange symbol-macrolet hack that allows us to additively wrap error
-   handling around our future generating forms."
-  (let ((args (gensym "awe-args")))
-    ;; remove *this call* off the symbol macro list and call attach after
-    ;; wrapping our error handling around everything.
-    `(symbol-macrolet ((%attach-expander% ,(cdr (get-expanders env))))
-       (attach (wrap-event-handler ,future-gen ,error-forms)
-               (lambda (&rest ,args)
-                 (handler-case
-                   (apply ,cb ,args)
-                   ,@error-forms))))))
-
-(defmacro future-handler-case (body-form &rest error-forms &environment env)
-  "Provides lexical error handling for any contained forms, including async
-   futures (both the future generation forms and the resulting attached lambdas)
-   offering a near-replacement for handler-case for async."
-  (if (find :future-debug *features*)
-      ;; we're debugging futures...disable all error handling (so errors bubble
-      ;; up to main loop)
-      body-form
-      ;; kewl, we're not debugging. make sure the (attach) macro loads our
-      ;; attach-with-error form (which applies the specified error handling).
-      `(handler-case
-         ;; add our attach-with-error call (long with the error handling forms)
-         ;; to our attach expansion symbol macro
-         (symbol-macrolet ((%attach-expander% ((attach-with-error ,error-forms) ,@(get-expanders env) ',error-forms)))
-           ,body-form)
-         ,@error-forms)))
 
