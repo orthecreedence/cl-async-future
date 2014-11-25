@@ -33,7 +33,7 @@
 ;; let the forwarding begin!
 ;; -----------------------------------------------------------------------------
 
-(defclass future (promise) ())
+(setf (find-class 'future) (find-class 'promise))
 (forward-function future-finished-p)
 (forward-function make-future)
 (forward-function lookup-forwarded-future)
