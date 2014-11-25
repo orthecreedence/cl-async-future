@@ -3,7 +3,7 @@
   :license "MIT"
   :version "0.4.4.1"
   :description "A futures implementation for Common Lisp. Plugs in nicely to cl-async."
-  :depends-on ()
+  :depends-on (#:blackbird)
   :components
   ((:file "package")
    (:file "future" :depends-on ("package"))))

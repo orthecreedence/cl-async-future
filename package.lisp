@@ -1,21 +1,19 @@
 (defpackage :cl-async-future
-  (:use :cl)
+  (:use :cl :blackbird)
   (:nicknames :asf)
   (:export #:future
            #:future-finished-p
            #:make-future
-           #:attach-errback
            #:lookup-forwarded-future
-           #:signal-error
            #:futurep
-           #:finish
            #:reset-future
-           #:attach
-           #:alet
-           #:alet*
-           #:aif
            #:multiple-future-bind
-           #:wait-for
-           #:adolist
-           #:future-handler-case))
+           #:future-handler-case
+           #:wait-for))
+(in-package :cl-async-future)
+
+(loop for sym being the external-symbols of (find-package :blackbird) do
+  (import sym)
+  (export sym))
+
 
