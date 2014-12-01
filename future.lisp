@@ -33,9 +33,22 @@
 ;; let the forwarding begin!
 ;; -----------------------------------------------------------------------------
 
-(setf (find-class 'future) (find-class 'promise))
+(defclass future (promise)
+  ((preserve-callbacks :accessor promise-preserve-callbacks :initarg :preserve-callbacks :initform nil
+    :documentation "When nil (the default) detaches callbacks after running
+                    promise.")
+   (reattach-callbacks :accessor promise-reattach-callbacks :initarg :reattach-callbacks :initform t
+    :documentation "When a promise's callback returns another promise, bind all
+                    callbacks from this promise onto the returned one. Allows
+                    values to transparently be derived from many layers deep of
+                    promises, almost like a real call stack.")))
+
+(defun make-future (&key preserve-callbacks (reattach-callbacks t))
+  "Create a blank future."
+  (make-instance 'future :preserve-callbacks preserve-callbacks
+                         :reattach-callbacks reattach-callbacks))
+
 (forward-function future-finished-p)
-(forward-function make-future)
 (forward-function lookup-forwarded-future)
 (forward-function futurep)
 (forward-function reset-future)
