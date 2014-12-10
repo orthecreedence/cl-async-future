@@ -3,7 +3,8 @@
   (:nicknames :asf)
   (:import-from :blackbird-base
                 #:finish
-                #:lookup-forwarded-promise)
+                #:lookup-forwarded-promise
+                #:promise-values)
   (:export #:future
            #:future-finished-p
            #:make-future

@@ -49,6 +49,7 @@
                          :reattach-callbacks reattach-callbacks))
 
 (forward-function future-finished-p)
+(forward-function future-values)
 (forward-function lookup-forwarded-future)
 (forward-function futurep)
 (forward-function reset-future)
